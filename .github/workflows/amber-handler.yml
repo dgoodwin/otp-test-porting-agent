@@ -1,0 +1,413 @@
+# OTP Test Porting Agent
+#
+# TRIGGERS:
+# - Issue labeled "port-tests" → creates a session to port tests
+# - Comment "@ambient-code" on issue/PR → follow-up / custom instruction
+# - Cron every 3 hours weekdays → batch check managed PRs for CI failures
+# - Manual dispatch → same as cron
+#
+# SESSION REUSE:
+# All paths check PR frontmatter for existing session ID.
+# If found, sends message to that session. If not, creates new.
+
+name: OTP Test Porting Agent
+
+on:
+  issues:
+    types: [labeled]
+  issue_comment:
+    types: [created]
+  schedule:
+    - cron: '17 */3 * * 1-5'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+  checks: write
+
+jobs:
+  # ─────────────────────────────────────────────────
+  # Job 1: Issue labeled "port-tests" → fresh porting session
+  # ─────────────────────────────────────────────────
+  handle-issue-label:
+    if: >-
+      github.event_name == 'issues'
+      && github.event.label.name == 'port-tests'
+    concurrency:
+      group: porter-${{ github.event.issue.number }}
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Acknowledge issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/reactions \
+            -X POST -f content=eyes --silent || true
+
+      - name: Resolve issue details
+        id: issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          NUMBER="${{ github.event.issue.number }}"
+          echo "number=$NUMBER" >> $GITHUB_OUTPUT
+
+          TITLE=$(gh issue view "$NUMBER" --repo "${{ github.repository }}" --json title --jq '.title')
+          {
+            echo "title<<EOF"
+            echo "$TITLE"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+
+          BODY=$(gh issue view "$NUMBER" --repo "${{ github.repository }}" --json body --jq '.body')
+          {
+            echo "body<<EOF"
+            echo "$BODY"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+
+      - name: Post acknowledgement
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue comment ${{ github.event.issue.number }} --repo "${{ github.repository }}" \
+            --body "🤖 Porting agent is starting a session. I'll create PRs on dgoodwin/origin and openshift-tests-private when done."
+
+      - name: Create porting session
+        id: session
+        uses: ambient-code/ambient-action@v0.0.5
+        with:
+          api-url: ${{ secrets.AMBIENT_API_URL }}
+          api-token: ${{ secrets.AMBIENT_BOT_TOKEN }}
+          project: ${{ secrets.AMBIENT_PROJECT }}
+          prompt: |
+            You are an automated test porting agent. Your job is to port Ginkgo e2e
+            tests from openshift-tests-private to openshift/origin.
+
+            Tracking issue: #${{ steps.issue.outputs.number }} — ${{ steps.issue.outputs.title }}
+            Issue URL: https://github.com/${{ github.repository }}/issues/${{ steps.issue.outputs.number }}
+
+            Issue body:
+            ${{ steps.issue.outputs.body }}
+
+            ## Instructions
+
+            1. Read the issue body for specifics — it should indicate how many tests
+               to port and optionally which subdirectory (e.g., "port 5 tests from networking").
+               If the issue doesn't specify, default to: 3 tests from any subdirectory.
+
+            2. Run the /port-tests command with the appropriate arguments.
+               For example: /port-tests 5 --from networking
+
+            3. The /port-tests command will:
+               - Find tests marked `// port=yes` in openshift-tests-private
+               - Port them to origin, adapting imports and framework calls
+               - Verify compilation
+               - Create a PR on dgoodwin/origin against openshift/origin
+               - Create a PR on openshift-tests-private updating annotations
+               - Add `ambient-code:managed` label to the origin PR
+
+            4. After creating the origin PR, include this frontmatter as the first
+               line of the PR body:
+               <!-- acp:session_id=$AGENTIC_SESSION_NAME source=#${{ steps.issue.outputs.number }} last_action=<ISO8601_NOW> retry_count=0 -->
+
+            5. Wait for CI on the origin PR. If tests fail, read logs and fix.
+
+            6. Comment on the tracking issue with a summary of what was ported
+               and links to both PRs.
+
+            7. Do not merge any PRs. Leave them open for human review.
+
+            ## Session URL
+
+            When linking to this session, resolve the URL from environment variables:
+            ```bash
+            echo "$PLATFORM_HOST/projects/$AGENTIC_SESSION_NAMESPACE/sessions/$AGENTIC_SESSION_NAME"
+            ```
+          repos: >-
+            [{"url": "https://github.com/dgoodwin/origin", "branch": "master"},
+             {"url": "https://github.com/openshift/openshift-tests-private", "branch": "porting-prep"}]
+          model: claude-opus-4-6
+          wait: 'true'
+          timeout: '0'
+          environment-variables: >-
+            {"GITHUB_TOKEN": "${{ secrets.GH_PAT }}", "SLACK_WEBHOOK_URL": "${{ secrets.SLACK_WEBHOOK_URL }}", "PLATFORM_HOST": "${{ secrets.PLATFORM_HOST }}"}
+
+      - name: Post session result
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SESSION_NAME: ${{ steps.session.outputs.session-name }}
+          SESSION_PHASE: ${{ steps.session.outputs.session-phase }}
+          SESSION_URL: ${{ steps.session.outputs.session-url }}
+        run: |
+          if [ -n "$SESSION_NAME" ]; then
+            if [ -n "$SESSION_URL" ]; then
+              BODY="🤖 Porting session completed (phase: $SESSION_PHASE). [View session]($SESSION_URL)"
+            else
+              BODY="🤖 Porting session \`$SESSION_NAME\` completed (phase: $SESSION_PHASE)."
+            fi
+            gh issue comment ${{ github.event.issue.number }} --repo "${{ github.repository }}" --body "$BODY"
+          fi
+
+  # ─────────────────────────────────────────────────
+  # Job 2: @ambient-code comment on issue/PR → follow-up
+  # ─────────────────────────────────────────────────
+  handle-comment:
+    if: >-
+      github.event_name == 'issue_comment'
+      && contains(github.event.comment.body, '@ambient-code')
+      && (github.event.comment.author_association == 'MEMBER'
+          || github.event.comment.author_association == 'OWNER'
+          || github.event.comment.author_association == 'COLLABORATOR')
+    concurrency:
+      group: porter-${{ github.event.issue.number }}
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Acknowledge comment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions \
+            -X POST -f content=eyes --silent || true
+
+      - name: Resolve context
+        id: context
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IS_PR: ${{ github.event.issue.pull_request && 'true' || 'false' }}
+        run: |
+          NUMBER="${{ github.event.issue.number }}"
+          echo "number=$NUMBER" >> $GITHUB_OUTPUT
+
+          if [ "$IS_PR" = "true" ]; then
+            echo "type=pr" >> $GITHUB_OUTPUT
+            echo "url=https://github.com/${{ github.repository }}/pull/$NUMBER" >> $GITHUB_OUTPUT
+            BODY=$(gh pr view "$NUMBER" --repo "${{ github.repository }}" --json body --jq '.body')
+            SESSION_ID=$(echo "$BODY" | grep -oP 'acp:session_id=\K[^ ]+' | head -1 || echo "")
+            echo "session_id=$SESSION_ID" >> $GITHUB_OUTPUT
+          else
+            echo "type=issue" >> $GITHUB_OUTPUT
+            echo "url=https://github.com/${{ github.repository }}/issues/$NUMBER" >> $GITHUB_OUTPUT
+            echo "session_id=" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create or resume session
+        id: session
+        uses: ambient-code/ambient-action@v0.0.5
+        with:
+          api-url: ${{ secrets.AMBIENT_API_URL }}
+          api-token: ${{ secrets.AMBIENT_BOT_TOKEN }}
+          project: ${{ secrets.AMBIENT_PROJECT }}
+          session-name: ${{ steps.context.outputs.session_id }}
+          prompt: |
+            Context: ${{ steps.context.outputs.type }} #${{ steps.context.outputs.number }}
+            URL: ${{ steps.context.outputs.url }}
+
+            User comment:
+            ${{ github.event.comment.body }}
+
+            ## Instructions
+
+            Follow the instructions in the comment. You have access to both
+            dgoodwin/origin and openshift/openshift-tests-private repos.
+
+            If the comment asks to port more tests, run /port-tests with the
+            appropriate arguments.
+
+            If the comment asks to fix something on an existing PR, investigate
+            and fix it.
+
+            When creating or updating PRs:
+            - Add `ambient-code:managed` label
+            - Include frontmatter: <!-- acp:session_id=$AGENTIC_SESSION_NAME source=#${{ steps.context.outputs.number }} last_action=<ISO8601_NOW> retry_count=N -->
+            - Wait for CI. If it fails, read logs and fix.
+            - Do not merge. Leave open for human review.
+          repos: >-
+            [{"url": "https://github.com/dgoodwin/origin", "branch": "master"},
+             {"url": "https://github.com/openshift/openshift-tests-private", "branch": "porting-prep"}]
+          model: claude-opus-4-6
+          wait: 'true'
+          timeout: '0'
+          environment-variables: >-
+            {"GITHUB_TOKEN": "${{ secrets.GH_PAT }}", "SLACK_WEBHOOK_URL": "${{ secrets.SLACK_WEBHOOK_URL }}", "PLATFORM_HOST": "${{ secrets.PLATFORM_HOST }}"}
+
+      - name: Post result
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SESSION_PHASE: ${{ steps.session.outputs.session-phase }}
+          SESSION_URL: ${{ steps.session.outputs.session-url }}
+        run: |
+          if [ -n "$SESSION_URL" ]; then
+            gh issue comment ${{ steps.context.outputs.number }} \
+              --repo "${{ github.repository }}" \
+              --body "🤖 Session completed (phase: $SESSION_PHASE). [View session]($SESSION_URL)"
+          fi
+
+  # ─────────────────────────────────────────────────
+  # Job 3: Batch check managed PRs on origin
+  # ─────────────────────────────────────────────────
+  batch-check:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    concurrency:
+      group: porter-batch
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check managed PRs on origin
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          AMBIENT_API_URL: ${{ secrets.AMBIENT_API_URL }}
+          AMBIENT_API_TOKEN: ${{ secrets.AMBIENT_BOT_TOKEN }}
+          AMBIENT_PROJECT: ${{ secrets.AMBIENT_PROJECT }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          PLATFORM_HOST: ${{ secrets.PLATFORM_HOST }}
+        run: |
+          pip install --quiet 'requests>=2.31.0'
+
+          python3 - << 'PYEOF'
+          import json, os, re, subprocess, time, uuid, requests
+
+          # We check PRs on dgoodwin/origin, not this repo
+          TARGET_REPO = "dgoodwin/origin"
+          API_URL = os.environ["AMBIENT_API_URL"]
+          API_TOKEN = os.environ["AMBIENT_API_TOKEN"]
+          PROJECT = os.environ["AMBIENT_PROJECT"]
+
+          def gh(*args):
+              result = subprocess.run(["gh"] + list(args), capture_output=True, text=True)
+              return result.stdout.strip()
+
+          def parse_frontmatter(body):
+              match = re.search(
+                  r'acp:session_id=(\S+)\s+source=(\S+)\s+last_action=(\S+)\s+retry_count=(\d+)',
+                  body or ""
+              )
+              if not match:
+                  return None
+              return {
+                  "session_id": match.group(1),
+                  "source": match.group(2),
+                  "retry_count": int(match.group(4)),
+              }
+
+          def create_or_message_session(prompt, session_name=""):
+              headers = {"Authorization": f"Bearer {API_TOKEN}", "Content-Type": "application/json"}
+              base = API_URL.rstrip("/")
+
+              if session_name:
+                  url = f"{base}/projects/{PROJECT}/agentic-sessions/{session_name}/agui/run"
+                  body = {
+                      "threadId": session_name,
+                      "runId": str(uuid.uuid4()),
+                      "messages": [{"id": str(uuid.uuid4()), "role": "user", "content": prompt}],
+                  }
+                  try:
+                      resp = requests.post(url, headers=headers, json=body, timeout=30)
+                      resp.raise_for_status()
+                      print(f"  Message sent to session {session_name}")
+                      return session_name
+                  except Exception as e:
+                      print(f"  Failed to message session: {e}, creating new")
+
+              url = f"{base}/projects/{PROJECT}/agentic-sessions"
+              body = {
+                  "initialPrompt": prompt,
+                  "llmSettings": {"model": "claude-opus-4-6"},
+                  "repos": [
+                      {"url": f"https://github.com/{TARGET_REPO}", "branch": "master"},
+                      {"url": "https://github.com/openshift/openshift-tests-private", "branch": "porting-prep"},
+                  ],
+              }
+              try:
+                  resp = requests.post(url, headers=headers, json=body, timeout=30)
+                  resp.raise_for_status()
+                  name = resp.json().get("name", "")
+                  print(f"  Created session {name}")
+                  return name
+              except Exception as e:
+                  print(f"  Failed to create session: {e}")
+                  return None
+
+          # Find all open managed PRs on dgoodwin/origin
+          prs_json = gh("pr", "list", "--repo", TARGET_REPO, "--state", "open",
+                        "--label", "ambient-code:managed", "--limit", "50",
+                        "--json", "number,body,title")
+          prs = json.loads(prs_json) if prs_json else []
+          print(f"Found {len(prs)} managed PRs on {TARGET_REPO}")
+
+          processed = 0
+          skipped = 0
+
+          for pr in prs:
+              number = pr["number"]
+              fm = parse_frontmatter(pr.get("body", ""))
+
+              # Check circuit breaker
+              if fm and fm["retry_count"] >= 3:
+                  print(f"PR #{number}: retry_count >= 3, needs human")
+                  continue
+
+              # Check CI status
+              checks = gh("pr", "checks", str(number), "--repo", TARGET_REPO,
+                          "--json", "state", "--jq", "[.[].state] | unique")
+              try:
+                  states = json.loads(checks) if checks else []
+              except json.JSONDecodeError:
+                  states = []
+
+              # Check for merge conflicts
+              mergeable = gh("pr", "view", str(number), "--repo", TARGET_REPO,
+                            "--json", "mergeable", "--jq", ".mergeable")
+
+              ci_failing = "FAILURE" in states
+              has_conflicts = mergeable == "CONFLICTING"
+
+              if not ci_failing and not has_conflicts:
+                  print(f"PR #{number}: healthy, skipping")
+                  skipped += 1
+                  continue
+
+              reason = []
+              if ci_failing:
+                  reason.append("CI failing")
+              if has_conflicts:
+                  reason.append("merge conflicts")
+              reason_str = ", ".join(reason)
+              print(f"PR #{number}: {reason_str}, triggering fix")
+
+              prompt = f"""You are maintaining a ported-tests PR on dgoodwin/origin.
+
+          PR: https://github.com/{TARGET_REPO}/pull/{number}
+          Issue: {reason_str}
+
+          ## Instructions
+
+          1. Check the current state of the PR:
+             - If CI is failing, read the logs with `gh pr checks {number} --repo {TARGET_REPO}` and fix compilation or test errors.
+             - If there are merge conflicts, resolve them.
+          2. Push fixes. Do not force-push.
+          3. Update the frontmatter retry_count if you made changes.
+          4. If retry_count reaches 3, add `ambient-code:needs-human` label and stop.
+          5. Do not merge."""
+
+              session_name = fm["session_id"] if fm else ""
+              create_or_message_session(prompt, session_name=session_name)
+              processed += 1
+
+          print(f"\nBatch complete: {processed} processed, {skipped} skipped")
+          PYEOF
+
+      - name: Batch summary
+        if: always()
+        run: |
+          echo "### OTP Porting Agent — Batch Check" >> $GITHUB_STEP_SUMMARY
+          echo "See step logs for per-PR details" >> $GITHUB_STEP_SUMMARY
