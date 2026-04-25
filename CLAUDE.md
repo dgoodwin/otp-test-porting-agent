@@ -4,7 +4,7 @@ Automated agent for porting Ginkgo e2e tests from `openshift/openshift-tests-pri
 
 ## Repos
 
-- **Source**: `openshift/openshift-tests-private` (branch: `porting-prep`) — contains tests annotated with `// port=yes|no|maybe|complete`
+- **Source**: `dgoodwin/openshift-tests-private` (branch: `porting-prep`) — fork with tests annotated with `// port=yes|no|maybe|complete`
 - **Destination**: `dgoodwin/origin` (fork of `openshift/origin`) — PRs created here against `openshift/origin`
 - **This repo**: `dgoodwin/otp-test-porting-agent` — orchestration only (workflows, skills, CLAUDE.md)
 

@@ -15,7 +15,7 @@ port-tests
 
 ## Description
 
-Ports e2e tests from `openshift-tests-private` to `openshift/origin`. Selects tests marked with `// port=yes` comments, adapts them to origin's framework and conventions, and ensures the project compiles.
+Ports e2e tests from `dgoodwin/openshift-tests-private` (branch: `porting-prep`) to `openshift/origin`. Selects tests marked with `// port=yes` comments, adapts them to origin's framework and conventions, and ensures the project compiles.
 
 This command:
 
@@ -196,24 +196,18 @@ Add the `ambient-code:managed` label to the PR.
 
 For each successfully ported test, update the comment in `openshift-tests-private` from `port=yes` to `port=complete`.
 
-Create a branch and PR:
+Commit and push directly to the `porting-prep` branch on `dgoodwin/openshift-tests-private`:
 
 ```bash
 cd /workspace/openshift-tests-private
-BRANCH="port-complete-$(date +%Y%m%d-%H%M%S)"
-git checkout -b "$BRANCH"
 git add -A
 git commit -m "Mark ported tests as port=complete
 
 Tests ported to openshift/origin PR: <PR_URL>"
-git push origin "$BRANCH"
-gh pr create --repo openshift/openshift-tests-private \
-  --base porting-prep \
-  --title "Mark ported tests as complete" \
-  --body "Updates port annotations for tests successfully ported to origin.
-
-Origin PR: <PR_URL>"
+git push origin porting-prep
 ```
+
+Since `porting-prep` is the working branch on the fork, push directly — no PR needed for source annotation updates.
 
 ### Step 9: Report Results
 

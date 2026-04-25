@@ -130,7 +130,7 @@ jobs:
             ```
           repos: >-
             [{"url": "https://github.com/dgoodwin/origin", "branch": "master"},
-             {"url": "https://github.com/openshift/openshift-tests-private", "branch": "porting-prep"}]
+             {"url": "https://github.com/dgoodwin/openshift-tests-private", "branch": "porting-prep"}]
           model: claude-opus-4-6
           wait: 'true'
           timeout: '0'
@@ -231,7 +231,7 @@ jobs:
             - Do not merge. Leave open for human review.
           repos: >-
             [{"url": "https://github.com/dgoodwin/origin", "branch": "master"},
-             {"url": "https://github.com/openshift/openshift-tests-private", "branch": "porting-prep"}]
+             {"url": "https://github.com/dgoodwin/openshift-tests-private", "branch": "porting-prep"}]
           model: claude-opus-4-6
           wait: 'true'
           timeout: '0'
@@ -324,7 +324,7 @@ jobs:
                   "llmSettings": {"model": "claude-opus-4-6"},
                   "repos": [
                       {"url": f"https://github.com/{TARGET_REPO}", "branch": "master"},
-                      {"url": "https://github.com/openshift/openshift-tests-private", "branch": "porting-prep"},
+                      {"url": "https://github.com/dgoodwin/openshift-tests-private", "branch": "porting-prep"},
                   ],
               }
               try:
