@@ -149,7 +149,7 @@ cd /workspace/origin && go build ./test/extended/...
 
 ### Step 7: Create Origin PR
 
-Create a branch and PR on `dgoodwin/origin` targeting `openshift/origin`:
+Create a branch and PR on `dgoodwin/origin`:
 
 ```bash
 cd /workspace/origin
@@ -163,8 +163,7 @@ Ported tests:
 
 Co-Authored-By: Ambient Code Agent <noreply@ambient-code.com>"
 git push origin "$BRANCH"
-gh pr create --repo openshift/origin \
-  --head "dgoodwin:$BRANCH" \
+gh pr create --repo dgoodwin/origin \
   --title "Port $COUNT e2e tests from openshift-tests-private [OTP]" \
   --body "$(cat <<'EOF'
 <!-- acp:session_id=$AGENTIC_SESSION_NAME source=#ISSUE_NUMBER last_action=$(date -u +%Y-%m-%dT%H:%M:%SZ) retry_count=0 -->
